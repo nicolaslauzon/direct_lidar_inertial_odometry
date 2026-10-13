@@ -96,6 +96,8 @@ private:
   ros::Publisher kf_pose_pub;
   ros::Publisher kf_cloud_pub;
   ros::Publisher deskewed_pub;
+  ros::Publisher scan_done_pub; // lio-bench
+  std::atomic<uint32_t> num_deskewed_published; // lio-bench
 
   // ROS Msgs
   nav_msgs::Odometry odom_ros;

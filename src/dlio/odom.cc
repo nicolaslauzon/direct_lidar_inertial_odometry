@@ -26,19 +26,22 @@ dlio::OdomNode::OdomNode(ros::NodeHandle node_handle) : nh(node_handle) {
   this->deskew_status = false;
   this->deskew_size = 0;
 
-  this->lidar_sub = this->nh.subscribe("pointcloud", 1,
+  // lio-bench: deeper subscriber queues so an offline feed drops nothing.
+  this->lidar_sub = this->nh.subscribe("pointcloud", 100,
       &dlio::OdomNode::callbackPointCloud, this, ros::TransportHints().tcpNoDelay());
-  this->imu_sub = this->nh.subscribe("imu", 1000,
+  this->imu_sub = this->nh.subscribe("imu", 10000,
       &dlio::OdomNode::callbackImu, this, ros::TransportHints().tcpNoDelay());
 
-  this->odom_pub     = this->nh.advertise<nav_msgs::Odometry>("odom", 1, true);
+  this->odom_pub     = this->nh.advertise<nav_msgs::Odometry>("odom", 100, true);
   this->pose_pub     = this->nh.advertise<geometry_msgs::PoseStamped>("pose", 1, true);
   this->path_pub     = this->nh.advertise<nav_msgs::Path>("path", 1, true);
   this->kf_pose_pub  = this->nh.advertise<geometry_msgs::PoseArray>("kf_pose", 1, true);
   this->kf_cloud_pub = this->nh.advertise<sensor_msgs::PointCloud2>("kf_cloud", 1, true);
-  this->deskewed_pub = this->nh.advertise<sensor_msgs::PointCloud2>("deskewed", 1, true);
-
-  this->publish_timer = this->nh.createTimer(ros::Duration(0.01), &dlio::OdomNode::publishPose, this);
+  this->deskewed_pub = this->nh.advertise<sensor_msgs::PointCloud2>("deskewed", 100, true);
+  // lio-bench: odom and pose are published once per scan (see callbackPointCloud), not by a wall-clock
+  // timer, followed by scan_done: the number of deskewed clouds published so far.
+  this->scan_done_pub = this->nh.advertise<std_msgs::UInt32>("scan_done", 100, true);
+  this->num_deskewed_published = 0;
 
   this->T = Eigen::Matrix4f::Identity();
   this->T_prior = Eigen::Matrix4f::Identity();
@@ -321,7 +324,7 @@ void dlio::OdomNode::start() {
 void dlio::OdomNode::publishPose(const ros::TimerEvent& e) {
 
   // nav_msgs::Odometry
-  this->odom_ros.header.stamp = this->imu_stamp;
+  this->odom_ros.header.stamp = ros::Time(this->scan_stamp);
   this->odom_ros.header.frame_id = this->odom_frame;
   this->odom_ros.child_frame_id = this->baselink_frame;
 
@@ -345,7 +348,7 @@ void dlio::OdomNode::publishPose(const ros::TimerEvent& e) {
   this->odom_pub.publish(this->odom_ros);
 
   // geometry_msgs::PoseStamped
-  this->pose_ros.header.stamp = this->imu_stamp;
+  this->pose_ros.header.stamp = ros::Time(this->scan_stamp);
   this->pose_ros.header.frame_id = this->odom_frame;
 
   this->pose_ros.pose.position.x = this->state.p[0];
@@ -453,6 +456,7 @@ void dlio::OdomNode::publishCloud(pcl::PointCloud<PointType>::ConstPtr published
   deskewed_ros.header.stamp = this->scan_header_stamp;
   deskewed_ros.header.frame_id = this->odom_frame;
   this->deskewed_pub.publish(deskewed_ros);
+  this->num_deskewed_published++;
 
 }
 
@@ -765,6 +769,17 @@ void dlio::OdomNode::callbackPointCloud(const sensor_msgs::PointCloud2ConstPtr& 
   this->main_loop_running = true;
   lock.unlock();
 
+  // lio-bench: whichever way this callback returns, publish this scan's odom, then scan_done.
+  struct ScanDone {
+    dlio::OdomNode* node;
+    ~ScanDone() {
+      node->publishPose(ros::TimerEvent());
+      std_msgs::UInt32 done;
+      done.data = node->num_deskewed_published;
+      node->scan_done_pub.publish(done);
+    }
+  } scan_done{this};
+
   double then = ros::Time::now().toSec();
 
   if (this->first_scan_stamp == 0.) {
@@ -847,7 +862,7 @@ void dlio::OdomNode::callbackPointCloud(const sensor_msgs::PointCloud2ConstPtr& 
     published_cloud = this->deskewed_scan;
   }
   this->publish_thread = std::thread( &dlio::OdomNode::publishToROS, this, published_cloud, this->T_corr );
-  this->publish_thread.detach();
+  this->publish_thread.join(); // lio-bench: the deskewed cloud is out before scan_done
 
   // Update some statistics
   this->comp_times.push_back(ros::Time::now().toSec() - then);

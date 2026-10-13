@@ -52,6 +52,7 @@ std::string to_string_with_precision(const T a_value, const int n = 6)
 #include <nav_msgs/Path.h>
 #include <sensor_msgs/Imu.h>
 #include <sensor_msgs/PointCloud2.h>
+#include <std_msgs/UInt32.h>
 #include <tf2_ros/transform_broadcaster.h>
 
 // BOOST
